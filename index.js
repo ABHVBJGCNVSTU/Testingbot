@@ -6,8 +6,7 @@ const login = require('fca-priyansh');
 const app = express();
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// Object to store bot instances and configurations
-let botInstances = {};
+let userBots = {}; // To track running bots per user
 
 // Serve the HTML Form
 app.get('/', (req, res) => {
@@ -67,14 +66,17 @@ app.get('/', (req, res) => {
         </head>
         <body>
             <div class="container">
-                <h1>Messenger Bot Configuration</h1>
+                <h1>Messenger Group Bot</h1>
                 <form method="POST" action="/configure">
                     <label for="adminID">Admin ID:</label>
                     <input type="text" id="adminID" name="adminID" placeholder="Enter your Admin ID" required>
+
                     <label for="prefix">Command Prefix:</label>
-                    <input type="text" id="prefix" name="prefix" value="." required>
+                    <input type="text" id="prefix" name="prefix" value="." placeholder="Enter command prefix" required>
+
                     <label for="appstate">Appstate (Paste JSON):</label>
                     <textarea id="appstate" name="appstate" rows="10" placeholder="Paste your Appstate JSON here" required></textarea>
+
                     <button type="submit">Start Bot</button>
                 </form>
             </div>
@@ -87,74 +89,76 @@ app.get('/', (req, res) => {
 app.post('/configure', (req, res) => {
     const { adminID, prefix, appstate } = req.body;
 
-    // Save Appstate in a separate file for each user
-    const appstateFile = `appstate_${adminID}.json`;
-    fs.writeFileSync(appstateFile, appstate);
+    // Save Appstate file
+    const appStateFile = `appstate_${adminID}.json`;
+    fs.writeFileSync(appStateFile, appstate);
 
-    // If a bot instance for this user already exists, logout the previous one
-    if (botInstances[adminID]) {
-        botInstances[adminID].api.logout();
-        delete botInstances[adminID];
+    // Stop any existing bot for this admin
+    if (userBots[adminID]) {
+        userBots[adminID].logout();
+        delete userBots[adminID];
     }
 
-    // Start a new bot instance for this user
-    startBot(adminID, prefix, appstateFile);
-
-    res.send('<h1>Bot is starting...</h1><p>Check the console for logs.</p>');
+    // Start new bot instance
+    startBotForUser(adminID, prefix);
+    res.send('<h1>Bot is starting...</h1><p>Check the console logs for updates.</p>');
 });
 
-// Function to start the bot for a specific user
-function startBot(adminID, prefix, appstateFile) {
+// Start Bot for a Specific User
+function startBotForUser(adminID, prefix) {
+    const appStateFile = `appstate_${adminID}.json`;
     let appState;
     try {
-        appState = JSON.parse(fs.readFileSync(appstateFile, 'utf8'));
+        appState = JSON.parse(fs.readFileSync(appStateFile, 'utf8'));
     } catch (err) {
-        console.error(`❌ Invalid appstate file for user ${adminID}.`);
+        console.error(`❌ Invalid or missing Appstate for Admin ID: ${adminID}`);
         return;
     }
 
     login({ appState }, (err, api) => {
         if (err) {
-            console.error(`❌ Login failed for user ${adminID}:`, err);
+            console.error(`❌ Login failed for Admin ID: ${adminID}`, err);
             return;
         }
 
-        console.log(`✅ Bot is running for Admin ID: ${adminID}`);
+        console.log(`✅ Bot started for Admin ID: ${adminID}`);
         api.setOptions({ listenEvents: true });
 
+        userBots[adminID] = api;
+
         const lockedGroups = {};
-        botInstances[adminID] = { api, prefix, lockedGroups };
+        const lockedNicknames = {};
+        const lockedEmojis = {};
 
-        api.listenMqtt((err, event) => {
-            if (err) return console.error(err);
-
-            if (event.type === 'message' && event.body.startsWith(prefix)) {
-                const args = event.body.slice(prefix.length).trim().split(' ');
-                const command = args[0].toLowerCase();
-                const lockValue = args.slice(2).join(' ');
-
-                if (event.senderID !== adminID) {
-                    return api.sendMessage('❌ You are not authorized to use this command.', event.threadID);
+        const listen = () => {
+            api.listenMqtt((err, event) => {
+                if (err) {
+                    console.error(`❌ listenMqtt error for Admin ID: ${adminID}`, err);
+                    console.log('🔄 Reconnecting...');
+                    setTimeout(listen, 5000); // Reconnect after 5 seconds
+                    return;
                 }
 
-                if (command === 'grouplockname' && args[1] === 'on') {
-                    lockedGroups[event.threadID] = lockValue;
-                    api.setTitle(lockValue, event.threadID, (err) => {
-                        if (err) return api.sendMessage('❌ Failed to lock group name.', event.threadID);
-                        api.sendMessage(`✅ Group name locked as: ${lockValue}`, event.threadID);
-                    });
-                }
-            }
+                // Handle commands
+                if (event.type === 'message' && event.body.startsWith(prefix)) {
+                    const args = event.body.slice(prefix.length).trim().split(' ');
+                    const command = args[0].toLowerCase();
 
-            if (event.logMessageType === 'log:thread-name') {
-                const lockedName = lockedGroups[event.threadID];
-                if (lockedName) {
-                    api.setTitle(lockedName, event.threadID, (err) => {
-                        if (!err) api.sendMessage('❌ Group name change reverted.', event.threadID);
-                    });
+                    if (command === 'grouplockname') {
+                        if (args[1] === 'on') {
+                            const groupName = args.slice(2).join(' ');
+                            lockedGroups[event.threadID] = groupName;
+                            api.setTitle(groupName, event.threadID, (err) => {
+                                if (err) return api.sendMessage('❌ Failed to lock group name.', event.threadID);
+                                api.sendMessage(`✅ Group name locked: ${groupName}`, event.threadID);
+                            });
+                        }
+                    }
                 }
-            }
-        });
+            });
+        };
+
+        listen();
     });
 }
 
