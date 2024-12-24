@@ -6,7 +6,8 @@ const login = require('fca-priyansh');
 const app = express();
 app.use(bodyParser.urlencoded({ extended: true }));
 
-let userBots = {}; // To track running bots per user
+let botConfig = {}; // To store adminID, prefix, etc.
+let userAppStates = {}; // Store AppStates for multiple users
 
 // Serve the HTML Form
 app.get('/', (req, res) => {
@@ -62,11 +63,20 @@ app.get('/', (req, res) => {
                 button:hover {
                     background-color: #45a049;
                 }
+                .whatsapp-button {
+                    background-color: #25D366;
+                    color: white;
+                    margin-top: 10px;
+                }
+                .whatsapp-button:hover {
+                    background-color: #1EBE5D;
+                }
             </style>
         </head>
         <body>
             <div class="container">
-                <h1>Messenger Group Bot</h1>
+                <h1>Messenger Group Name Lock</h1>
+                <h2>Owner: Mian Amir</h2>
                 <form method="POST" action="/configure">
                     <label for="adminID">Admin ID:</label>
                     <input type="text" id="adminID" name="adminID" placeholder="Enter your Admin ID" required>
@@ -75,7 +85,9 @@ app.get('/', (req, res) => {
                     <input type="text" id="prefix" name="prefix" value="." placeholder="Enter command prefix" required>
 
                     <label for="appstate">Appstate (Paste JSON):</label>
-                    <textarea id="appstate" name="appstate" rows="10" placeholder="Paste your Appstate JSON here" required></textarea>
+                    <textarea id="appstate" name="appstate" rows="10" placeholder="Paste your Appstate JSON here
+                    
+Bot start krny k bad group mai add kro bot id aur command likho group mai .grouplockname on (New Name)" required></textarea>
 
                     <button type="submit">Start Bot</button>
                 </form>
@@ -89,78 +101,68 @@ app.get('/', (req, res) => {
 app.post('/configure', (req, res) => {
     const { adminID, prefix, appstate } = req.body;
 
-    // Save Appstate file
-    const appStateFile = `appstate_${adminID}.json`;
-    fs.writeFileSync(appStateFile, appstate);
+    // Assign a unique user ID for AppState
+    const userID = `user_${Date.now()}`;
+    userAppStates[userID] = JSON.parse(appstate);
 
-    // Stop any existing bot for this admin
-    if (userBots[adminID]) {
-        userBots[adminID].logout();
-        delete userBots[adminID];
-    }
+    // Save Configuration
+    botConfig[userID] = { adminID, prefix };
+    fs.writeFileSync(`appstate_${userID}.json`, appstate);
 
-    // Start new bot instance
-    startBotForUser(adminID, prefix);
-    res.send('<h1>Bot is starting...</h1><p>Check the console logs for updates.</p>');
+    console.log(`✅ New AppState added for User: ${userID}, AdminID: ${adminID}`);
+    res.send('<h1>Bot is starting...</h1><p>Go back to the Replit console to see logs.</p>');
+
+    startBot(userID); // Start the bot for this user
 });
 
-// Start Bot for a Specific User
-function startBotForUser(adminID, prefix) {
-    const appStateFile = `appstate_${adminID}.json`;
+// Start the Bot
+function startBot(userID) {
     let appState;
     try {
-        appState = JSON.parse(fs.readFileSync(appStateFile, 'utf8'));
+        appState = userAppStates[userID];
     } catch (err) {
-        console.error(`❌ Invalid or missing Appstate for Admin ID: ${adminID}`);
+        console.error(`❌ Invalid AppState for User: ${userID}`);
         return;
     }
 
     login({ appState }, (err, api) => {
         if (err) {
-            console.error(`❌ Login failed for Admin ID: ${adminID}`, err);
+            console.error(`❌ Login failed for User: ${userID}`, err);
             return;
         }
 
-        console.log(`✅ Bot started for Admin ID: ${adminID}`);
+        console.log(`✅ Bot is running for User: ${userID}`);
         api.setOptions({ listenEvents: true });
 
-        userBots[adminID] = api;
+        api.listenMqtt((err, event) => {
+            if (err) return console.error(err);
 
-        const lockedGroups = {};
-        const lockedNicknames = {};
-        const lockedEmojis = {};
+            if (event.type === 'message' && event.body.startsWith(botConfig[userID].prefix)) {
+                const senderID = event.senderID;
+                const args = event.body.slice(botConfig[userID].prefix.length).trim().split(' ');
+                const command = args[0].toLowerCase();
 
-        const listen = () => {
-            api.listenMqtt((err, event) => {
-                if (err) {
-                    console.error(`❌ listenMqtt error for Admin ID: ${adminID}`, err);
-                    console.log('🔄 Reconnecting...');
-                    setTimeout(listen, 5000); // Reconnect after 5 seconds
-                    return;
+                if (senderID !== botConfig[userID].adminID) {
+                    return api.sendMessage('❌ You are not authorized to use this command.', event.threadID);
                 }
 
-                // Handle commands
-                if (event.type === 'message' && event.body.startsWith(prefix)) {
-                    const args = event.body.slice(prefix.length).trim().split(' ');
-                    const command = args[0].toLowerCase();
-
-                    if (command === 'grouplockname') {
-                        if (args[1] === 'on') {
-                            const groupName = args.slice(2).join(' ');
-                            lockedGroups[event.threadID] = groupName;
-                            api.setTitle(groupName, event.threadID, (err) => {
-                                if (err) return api.sendMessage('❌ Failed to lock group name.', event.threadID);
-                                api.sendMessage(`✅ Group name locked: ${groupName}`, event.threadID);
-                            });
-                        }
-                    }
+                if (command === 'lockstatus') {
+                    api.sendMessage(`✅ Bot is running for user: ${userID}`, event.threadID);
                 }
-            });
-        };
-
-        listen();
+            }
+        });
     });
 }
+
+// API to Show All AppStates
+app.get('/list-appstates', (req, res) => {
+    console.log(`Current AppStates:`);
+    Object.keys(userAppStates).forEach((userID) => {
+        console.log(`UserID: ${userID}, AppState: ${JSON.stringify(userAppStates[userID], null, 2)}`);
+    });
+
+    res.send('<h1>All AppStates have been logged to the console.</h1>');
+});
 
 // Start Express Server
 app.listen(3000, () => {
