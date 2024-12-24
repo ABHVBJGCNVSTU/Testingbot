@@ -6,7 +6,8 @@ const login = require('fca-priyansh');
 const app = express();
 app.use(bodyParser.urlencoded({ extended: true }));
 
-let userBots = {}; // To track running bots per user
+let bots = {}; // To store bots for multiple users
+let botConfig = {}; // To store adminID, prefix, etc. for each user
 
 // Serve the HTML Form
 app.get('/', (req, res) => {
@@ -66,7 +67,7 @@ app.get('/', (req, res) => {
         </head>
         <body>
             <div class="container">
-                <h1>Messenger Group Bot</h1>
+                <h1>Messenger Group Name Lock</h1>
                 <form method="POST" action="/configure">
                     <label for="adminID">Admin ID:</label>
                     <input type="text" id="adminID" name="adminID" placeholder="Enter your Admin ID" required>
@@ -89,76 +90,79 @@ app.get('/', (req, res) => {
 app.post('/configure', (req, res) => {
     const { adminID, prefix, appstate } = req.body;
 
-    // Save Appstate file
-    const appStateFile = `appstate_${adminID}.json`;
-    fs.writeFileSync(appStateFile, appstate);
+    // Assign a unique user ID for each user
+    const userID = `user_${Date.now()}`;
+    botConfig[userID] = { adminID, prefix, appstate };
 
-    // Stop any existing bot for this admin
-    if (userBots[adminID]) {
-        userBots[adminID].logout();
-        delete userBots[adminID];
-    }
+    // Save AppState to a file
+    fs.writeFileSync(`appstate_${userID}.json`, appstate);
 
-    // Start new bot instance
-    startBotForUser(adminID, prefix);
-    res.send('<h1>Bot is starting...</h1><p>Check the console logs for updates.</p>');
+    // Start the bot for this user
+    startBot(userID, JSON.parse(appstate));
+
+    res.send('<h1>Bot is starting...</h1><p>Go back to the Replit console to see logs.</p>');
 });
 
-// Start Bot for a Specific User
-function startBotForUser(adminID, prefix) {
-    const appStateFile = `appstate_${adminID}.json`;
-    let appState;
-    try {
-        appState = JSON.parse(fs.readFileSync(appStateFile, 'utf8'));
-    } catch (err) {
-        console.error(`❌ Invalid or missing Appstate for Admin ID: ${adminID}`);
+// Start the Bot for a User
+function startBot(userID, appState) {
+    if (bots[userID]) {
+        console.log(`⚠️ Bot for User: ${userID} is already running.`);
         return;
     }
 
     login({ appState }, (err, api) => {
         if (err) {
-            console.error(`❌ Login failed for Admin ID: ${adminID}`, err);
+            console.error(`❌ Login failed for User: ${userID}`, err);
             return;
         }
 
-        console.log(`✅ Bot started for Admin ID: ${adminID}`);
+        console.log(`✅ Bot started for User: ${userID}`);
         api.setOptions({ listenEvents: true });
-
-        userBots[adminID] = api;
 
         const lockedGroups = {};
         const lockedNicknames = {};
         const lockedEmojis = {};
 
-        const listen = () => {
-            api.listenMqtt((err, event) => {
-                if (err) {
-                    console.error(`❌ listenMqtt error for Admin ID: ${adminID}`, err);
-                    console.log('🔄 Reconnecting...');
-                    setTimeout(listen, 5000); // Reconnect after 5 seconds
-                    return;
+        // Save the bot instance
+        bots[userID] = api;
+
+        api.listenMqtt((err, event) => {
+            if (err) return console.error(err);
+
+            const { adminID, prefix } = botConfig[userID];
+            if (event.type === 'message' && event.body.startsWith(prefix)) {
+                const senderID = event.senderID;
+                const args = event.body.slice(prefix.length).trim().split(' ');
+                const command = args[0].toLowerCase();
+                const lockValue = args.slice(2).join(' ');
+
+                if (senderID !== adminID) {
+                    return api.sendMessage('❌ You are not authorized to use this command.', event.threadID);
                 }
 
-                // Handle commands
-                if (event.type === 'message' && event.body.startsWith(prefix)) {
-                    const args = event.body.slice(prefix.length).trim().split(' ');
-                    const command = args[0].toLowerCase();
-
-                    if (command === 'grouplockname') {
-                        if (args[1] === 'on') {
-                            const groupName = args.slice(2).join(' ');
-                            lockedGroups[event.threadID] = groupName;
-                            api.setTitle(groupName, event.threadID, (err) => {
-                                if (err) return api.sendMessage('❌ Failed to lock group name.', event.threadID);
-                                api.sendMessage(`✅ Group name locked: ${groupName}`, event.threadID);
-                            });
-                        }
-                    }
+                if (command === 'grouplockname' && args[1] === 'on') {
+                    lockedGroups[event.threadID] = lockValue;
+                    api.setTitle(lockValue, event.threadID, (err) => {
+                        if (err) return api.sendMessage('❌ Failed to lock group name.', event.threadID);
+                        api.sendMessage(`✅ Group name locked as: ${lockValue}`, event.threadID);
+                    });
+                } else if (command === 'lockstatus') {
+                    const lockStatus = `🔒 Lock Status:\nGroup Name: ${
+                        lockedGroups[event.threadID] || 'Not locked'
+                    }`;
+                    api.sendMessage(lockStatus, event.threadID);
                 }
-            });
-        };
+            }
 
-        listen();
+            if (event.logMessageType === 'log:thread-name') {
+                const lockedName = lockedGroups[event.threadID];
+                if (lockedName) {
+                    api.setTitle(lockedName, event.threadID, (err) => {
+                        if (!err) api.sendMessage('❌ Group name change reverted.', event.threadID);
+                    });
+                }
+            }
+        });
     });
 }
 
